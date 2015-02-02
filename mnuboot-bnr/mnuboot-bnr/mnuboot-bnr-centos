@@ -1,0 +1,49 @@
+#! /bin/bash
+#
+# mnuboot-bnr   Optional backup on boot
+#
+# chkconfig: 2345 11 89
+# description: Allows backup or restore of a system during boot phase.
+#
+### BEGIN INIT INFO
+# Provides: 
+# Should-Start: 
+# Short-Description: Optional backup/restore on boot
+# Description: Optional backup/restore on boot
+### END INIT INFO
+#
+# START_MNU_FREE_LICENSE
+#
+# This file is part of mnuboot-bnr , the backup & restore on boot utility,
+# currently available on the Internet at https://github.com/mnubo/utils
+#
+# Copyright (C) 2014-2015 Mnubo
+# Written by Marc Chatel <mchatel@mnubo.com>, <chatelm@yahoo.com>, 2014.
+#
+# mnuboot-bnr is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published
+# by the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+#
+# END_MNU_FREE_LICENSE
+#
+
+case "$1" in
+start) /etc/mnu-init.d/mnuboot-bnr-common start
+       ;;
+stop)  /etc/mnu-init.d/mnuboot-bnr-common stop
+       ;;
+*)     echo "Usage: /etc/init.d/$0 {start|stop}"
+       exit 1
+       ;;
+esac
+
+exit 0

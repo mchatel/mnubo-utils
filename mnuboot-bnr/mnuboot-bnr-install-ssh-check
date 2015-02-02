@@ -1,0 +1,210 @@
+#!/bin/bash
+#
+# START_MNU_FREE_LICENSE
+#
+# This file is part of mnuboot-bnr , the backup & restore on boot utility,
+# currently available on the Internet at https://github.com/mnubo/utils
+#
+# Copyright (C) 2014-2015 Mnubo
+# Written by Marc Chatel <mchatel@mnubo.com>, <chatelm@yahoo.com>, 2014.
+#
+# mnuboot-bnr is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published
+# by the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+#
+# END_MNU_FREE_LICENSE
+#
+SDM_SSH_CONF_FILE=/etc/sysconfig/sdm-ssh.conf
+
+MY_TMPDIR="$HOME/tmp"
+
+MY_TMPFILE_1="$MY_TMPDIR/ssh-check.tmp1.$$"
+MY_TMPFILE_2="$MY_TMPDIR/ssh-check.tmp2.$$"
+MY_TMPFILE_SUCC_LOG="$MY_TMPDIR/ssh-check.tmp-succ.$$"
+
+MY_TMPFILE_LIST="$MY_TMPFILE_1 $MY_TMPFILE_2 $MY_TMPFILE_SUCC_LOG"
+
+clean_exit()
+{
+   rm -f $MY_TMPFILE_LIST
+   exit 0
+}
+
+check_tmpdir()
+{
+   if [ -L $MY_TMPDIR ]
+   then
+      echo "FAILED"
+      echo "Path $MY_TMPDIR is a logical link, unsupported!"
+      clean_exit
+   fi
+
+   if [ ! -e $MY_TMPDIR ]
+   then
+      mkdir -p $MY_TMPDIR
+   fi
+
+   if [ ! -d $MY_TMPDIR ]
+   then
+      echo "FAILED"
+      echo "Path $MY_TMPDIR is not a directory."
+      clean_exit
+   fi
+}
+
+check_hostname()
+{
+   MY_SSH_HOST_NAME=`hostname`
+
+   if [ "X$CMDLINE_PARM_1" != "X" ]
+   then
+      if [ "X$CMDLINE_PARM_1" != "X$MY_SSH_HOST_NAME" ]
+      then
+         echo "FAILED"
+         T_MSG="Actual system host name is \"$MY_SSH_HOST_NAME\""
+         T_MSG="$T_MSG instead of expected \"$CMDLINE_PARM_1\"."
+         echo "$T_MSG"
+         clean_exit
+      fi
+
+      T_MSG="SUCCESS: Actual system host name matches configuration."
+      echo "$T_MSG" >> $MY_TMPFILE_SUCC_LOG
+   fi
+}
+
+check_sdm_ssh_group()
+{
+   if [ -f $SDM_SSH_CONF_FILE ]
+   then
+      T_MSG="SUCCESS: sdm-ssh-tool configuration detected."
+      echo "$T_MSG" >> $MY_TMPFILE_SUCC_LOG
+
+      cat $SDM_SSH_CONF_FILE | sed -e 's/#.*$//' \
+                             | grep "LOCAL-GROUP" > $MY_TMPFILE_1
+      read F1 F2 F3 < $MY_TMPFILE_1
+
+      if [ "X$F1" != "XLOCAL-GROUP" -o "X$F3" != "X" ]
+      then
+         echo "FAILED"
+         echo "Cannot read local group from $SDM_SSH_CONF_FILE."
+         clean_exit
+      fi
+
+      MY_SSH_KEY_NAME="$F2"
+
+      T_MSG="SUCCESS: Expecting SSH key ID(s)"
+      T_MSG="$T_MSG to be named \"$MY_SSH_KEY_NAME\""
+
+      echo "$T_MSG" >> $MY_TMPFILE_SUCC_LOG
+   fi
+}
+
+check_ssh_keys()
+{
+   NUM_OK_KEYS=0
+   SSH_DIR="$HOME/.ssh"
+
+   if [ ! -d $SSH_DIR ]
+   then
+      echo "FAILED"
+      echo "Path $SSH_DIR not found or not a directory."
+      clean_exit
+   fi
+
+   EXPECTED_KEY_NAME=`whoami`
+   EXPECTED_KEY_NAME="${EXPECTED_KEY_NAME}@$MY_SSH_KEY_NAME"
+   NUM_OK_KEYS=0
+
+   for K_F in id_dsa.pub id_rsa.pub id_ecdsa.pub
+   do
+      ABS_K_F="$SSH_DIR/$K_F"
+
+      if [ -f $ABS_K_F ]
+      then
+         K_F_NUM_LINES=`wc -l < $ABS_K_F`
+
+         if [ $K_F_NUM_LINES -ne 1 ]
+         then
+            echo "FAILED"
+            echo "File $ABS_K_F should have exactly one line."
+            clean_exit
+         fi
+
+         cat $ABS_K_F > $MY_TMPFILE_2
+
+         while [ 1 -eq 1 ]
+         do
+            read F1 F2 < $MY_TMPFILE_2
+
+            if [ "X$F1" = "X" ]
+            then
+               echo "FAILED"
+               echo "Cannot parse file $ABS_K_F"
+               clean_exit
+            fi
+
+            if [ "X$F2" != "X" ]
+            then
+               echo "$F2" > $MY_TMPFILE_2
+            else 
+               if [ "X$F1" = "X$EXPECTED_KEY_NAME" ]
+               then
+                  NUM_OK_KEYS=`expr $NUM_OK_KEYS + 1`
+
+                  T_MSG="SUCCESS: SSH key file \"$ABS_K_F\""
+                  T_MSG="$T_MSG has a good ID."
+
+                  echo "$T_MSG" >> $MY_TMPFILE_SUCC_LOG
+                  cat $ABS_K_F  >> $MY_TMPFILE_SUCC_LOG
+               else
+                  echo "FAILED"
+                  T_MSG="Key ID in $SSH_DIR/$K_F set to \"$F1\""
+                  T_MSG="$T_MSG instead of expected value"
+                  T_MSG="$T_MSG \"$EXPECTED_KEY_NAME\"."
+
+                  echo "$T_MSG"
+                  clean_exit
+               fi
+
+               break
+            fi
+         done
+      fi
+   done
+
+   if [ $NUM_OK_KEYS -le 0 ]
+   then
+      echo "FAILED"
+      echo "Cannot find SSH key files for account \"`whoami`\""
+      clean_exit
+   fi
+}
+
+### MAIN PROGRAM ###
+
+CMDLINE_PARM_1="$1"
+
+check_tmpdir
+
+rm -f $MY_TMPFILE_LIST
+
+check_hostname
+
+MY_SSH_KEY_NAME="$MY_SSH_HOST_NAME"
+
+check_sdm_ssh_group
+check_ssh_keys
+
+echo "SUCCESS"
+cat $MY_TMPFILE_SUCC_LOG
+rm -f $MY_TMPFILE_LIST
+exit 0

@@ -1,0 +1,1750 @@
+#!/bin/bash
+#
+# START_MNU_FREE_LICENSE
+#
+# This file is part of mnuboot-bnr , the backup & restore on boot utility,
+# currently available on the Internet at https://github.com/mnubo/utils
+#
+# Copyright (C) 2014-2015 Mnubo
+# Written by Marc Chatel <mchatel@mnubo.com>, <chatelm@yahoo.com>, 2014.
+#
+# mnuboot-bnr is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published
+# by the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+#
+# END_MNU_FREE_LICENSE
+#
+
+PATH="/sbin:/bin:/usr/sbin:/usr/bin"
+export PATH
+
+MNUBOOT_BNR_VERSION="v0.6"
+
+#######################################################################
+#                                                                     #
+# This script allows doing a system backup or restore during the boot #
+# phase, while high-level applications are not running yet.           #
+#                                                                     #
+# Requirements:                                                       #
+#                                                                     #
+# 1- This script is activated to run on boot, typically with:         #
+#                update-rc.d mnuboot-bnr defaults                     #
+#                                                                     #
+# 2- Config file /etc/mnuboot-bnr.conf filled in with the username    #
+#    and host to use with SSH/SCP on the target backup server.        #
+#                                                                     #
+#    This target user must have the SSH key pair of the backup client #
+#    accepted in authorized_keys in the target user@host.             #
+#                                                                     #
+# 3- a) To reboot, take a backup, and reboot again, do:               #
+#       touch /.MNUBOOT-BACKUP-<backup_name>                          #
+#       shutdown -r now                                               #
+#                                                                     #
+# 3- b) To reboot, take a backup, and do a halt/poweroff, do:         #
+#       touch /.MNUBOOT-BACKUPHALT-<backup_name>                      #
+#       shutdown -r now                                               #
+#                                                                     #
+# 4- a) To reboot, restore from a backup, and reboot again, do:       #
+#       touch /.MNUBOOT-RESTORE-<backup_name>                         #
+#       shutdown -r now                                               #
+#                                                                     #
+#    b) To reboot, restore from a backup, and do a halt/poweroff, do: #
+#       touch /.MNUBOOT-RESTOREHALT-<backup_name>                     #
+#       shutdown -r now                                               #
+#                                                                     #
+#    *** A SUCCESSFUL RESTORE-ON-BOOT REQUIRES THE SYSTEM TO BE ***   #
+#    *** IN A "SANE-ENOUGH" STATE TO BOOT, RUN THE SCRIPT, AND  ***   #
+#    *** ACCESS THE BACKUP SERVER VIA SSH.                      ***   #
+#                                                                     #
+#    *** IF NOT, THE FILES IN THE BACKUP DIRECTORY CAN BE USED  ***   #
+#    *** TO RESTORE THE SYSTEM MANUALLY, AFTER BOOTING FROM     ***   #
+#    *** SOME SORT OF RESCUE MEDIA. THIS REQUIRES EXPERIENCE    ***   #
+#    *** WITH LINUX SYSTEM REBUILD, FDISK, LVM, GRUB, ETC.      ***   #
+#                                                                     #
+#######################################################################
+
+
+
+MY_CMD=`basename $0`
+
+# Useful scripts used in progress/error messages
+
+MY_CMD_ERR="ERROR : $MY_CMD :"
+MY_CMD_OK="OK    : $MY_CMD :"
+MY_CMD_WARN="WARNING : $MY_CMD :"
+
+# The config file that must exist on the backup client
+
+MY_CONF_FILE="/etc/mnuboot-bnr.conf"
+
+# List of shell variables that must be defined in the config file
+
+MY_CONF_VAR_LIST="MNUBOOT_BNR_USER MNUBOOT_BNR_HOST"
+MY_CONF_VAR_LIST="$MY_CONF_VAR_LIST MNUBOOT_BNR_SSH_PORT"
+MY_CONF_VAR_LIST="$MY_CONF_VAR_LIST MNUBOOT_BNR_TOP_DIR"
+
+ROOT_SSH_DIR=root/.ssh
+
+T_L="awk basename cat chmod chroot date df du e2label echo expr"
+T_L="$T_L fdisk grep grub-install host kill ls mkdir mkfs mount"
+T_L="$T_L mv ping pivot_root poweroff ps readlink reboot rm"
+T_L="$T_L rmdir scp sed service sleep ssh tail tar test touch"
+T_L="$T_L tr true tune2fs umount wc"
+BINS_REQ_LIST="$T_L"
+
+RAMDISK_MOUNT_POINT_BASE="mnuboot-backup"
+RAMDISK_MOUNT_POINT="/$RAMDISK_MOUNT_POINT_BASE"
+RAMDISK_TARGET_PERCENT_USE="75"
+RAM_FREE_MB_NEEDED="200"
+WHOLE_DIRS_TO_INCLUDE="bin dev etc lib lib64 sbin usr/bin usr/sbin"
+
+T_L="mnt-tmp proc run/lock run/shm sys tmp usr/lib var/log"
+DIRLIST_TO_CREATE="$T_L"
+
+T_L="apache2 cgi-bin cups gcc git-core jvm locale nagios oracle-jvm"
+T_L="$T_L perl perl5 pymodules python2.6 python2.7 ruby"
+USR_LIB_SUBTREES_TO_EXCLUDE="$T_L"
+
+T_L="libbind libcrypto libdns libfipscheck libgmp libgssapi"
+T_L="$T_L libisc libk5crypto libkrb5 liblwres libnspr libnss"
+T_L="$T_L libplc libplds libxml"
+USR_LIB64_LIBS_TO_INCLUDE="$T_L"
+
+FS_INFO_DIR_BASE="fs-info"
+FS_INFO_DIR="$RAMDISK_MOUNT_POINT/$FS_INFO_DIR_BASE"
+
+GRUB_INST_MOUNT_LIST="boot var usr tmp"
+
+PING_TRY_COUNT=2
+NUM_DNS_RESOLV_RETRIES=3
+
+HALT_AFTER_OPERATION=0
+
+# Timer values used in script
+
+SHORT_SLEEP=3   # Needed in several places for sequence reliability
+SLEEP_BEFORE_REBOOT=10
+SSH_CONN_TIMEOUT=5
+
+MNUBOOT_TMP_SSH_KNOWN_HOSTS="/tmp/mnuboot.ssh-known-hosts.$$"
+MNUBOOT_TMP_SSH_STDOUT="/tmp/mnuboot.ssh.stdout.$$"
+MNUBOOT_TMP_SSH_STDERR="/tmp/mnuboot.ssh.stderr.$$"
+MNUBOOT_TMP_FILE1="/tmp/mnuboot.tmp1.$$"
+MNUBOOT_TMP_FILE2="/tmp/mnuboot.tmp2.$$"
+MNUBOOT_TMP_UNMOUNT1="$RAMDISK_MOUNT_POINT/unmount.tmp1.$$"
+MNUBOOT_TMP_UNMOUNT2="$RAMDISK_MOUNT_POINT/unmount.tmp2.$$"
+MNUBOOT_TMP_GRUB="/grub.out.tmp1.$$"
+
+# List of temp files to remove on script exit.
+
+MNU_TMPFILE_LIST="$MNUBOOT_TMP_SSH_KNOWN_HOSTS \
+                  $MNUBOOT_TMP_SSH_STDOUT      \
+                  $MNUBOOT_TMP_SSH_STDERR      \
+                  $MNUBOOT_TMP_FILE1           \
+                  $MNUBOOT_TMP_FILE2           \
+                  $MNUBOOT_TMP_UNMOUNT1        \
+                  $MNUBOOT_TMP_UNMOUNT2        \
+                  $MNUBOOT_TMP_GRUB"
+
+
+
+#######################################################################
+############################ mnuboot_exit() ###########################
+#######################################################################
+
+# Remove any temp files lying around and exit the script
+# with the return code passed as a parameter.
+
+mnuboot_exit()
+{
+   EXIT_RC=1
+
+   if [ "X$1" != "X" ]
+   then
+      EXIT_RC="$1"
+   fi
+
+   if [ "X$EXIT_RC" != "X0" ]
+   then
+      echo "$MY_CMD_ERR Exit with rc = $EXIT_RC"
+   fi
+
+   rm -f $MNU_TMPFILE_LIST
+
+   exit $EXIT_RC
+
+} # END FUNCTION mnuboot_exit()
+
+
+
+#######################################################################
+########################## sync_if_possible() #########################
+#######################################################################
+
+# If the "sync" executable is available, run it!
+
+sync_if_possible()
+{
+   MY_SYNC=`which sync 2> /dev/null`
+
+   if [ "X$MY_SYNC" != "X" ]
+   then
+      sync
+   fi
+} # END FUNCTION sync_if_possible()
+
+
+
+#######################################################################
+###################### check_for_backup_request() #####################
+#######################################################################
+
+# Check if we have one or more filenames of the form
+# /.MNUBOOT-BACKUP-xxx or /.MNUBOOT-BACKUPHALT-xxx that indicate
+# a backup request.
+#
+# If so, remove ALL such files, and set MNU_BACKUP_ACTIVATED=1
+# and MNU_BACKUP_NAME to reflect the --LAST-- /.MNUBOOT-BACKUP-xxx
+# of /.MNUBOOT-BACKUPHALT-xxx file found.
+#
+# If BACKUPHALT was used, set HALT_AFTER_OPERATION=1
+
+check_for_backup_request()
+{
+   MNU_BACKUP_ACTIVATED=0
+   MNU_BACKUP_NAME_PREFIX="MNUBOOT-BACKUP-"
+   MNU_BACKUP_NAME=""
+
+   for ONE_FILE in /.${MNU_BACKUP_NAME_PREFIX}*
+   do
+      if [ -L $ONE_FILE ]
+      then
+         echo "$MY_CMD_WARN Removing logical link $ONE_FILE"
+         rm -f $ONE_FILE
+         sync_if_possible
+         continue
+      fi
+
+      if [ -f $ONE_FILE ]
+      then
+         MNU_BACKUP_NAME=`echo $ONE_FILE | \
+                          sed -e "s,/\.$MNU_BACKUP_NAME_PREFIX,,"`
+         MNU_BACKUP_ACTIVATED=1
+         rm -f $ONE_FILE
+         sync_if_possible
+      fi
+
+      if [ -d $ONE_FILE ]
+      then
+         echo "$MY_CMD_ERR Path $ONE_FILE is a directory"
+         mnuboot_exit 1
+      fi
+   done
+
+   MNU_BACKUP_NAME_PREFIX="MNUBOOT-BACKUPHALT-"
+
+   for ONE_FILE in /.${MNU_BACKUP_NAME_PREFIX}*
+   do
+      if [ -L $ONE_FILE ]
+      then
+         echo "$MY_CMD_WARN Removing logical link $ONE_FILE"
+         rm -f $ONE_FILE
+         sync_if_possible
+         continue
+      fi
+
+      if [ -f $ONE_FILE ]
+      then
+         MNU_BACKUP_NAME=`echo $ONE_FILE | \
+                          sed -e "s,/\.$MNU_BACKUP_NAME_PREFIX,,"`
+         MNU_BACKUP_ACTIVATED=1
+         HALT_AFTER_OPERATION=1
+         rm -f $ONE_FILE
+         sync_if_possible
+      fi
+
+      if [ -d $ONE_FILE ]
+      then
+         echo "$MY_CMD_ERR Path $ONE_FILE is a directory"
+         mnuboot_exit 1
+      fi
+   done
+
+} ### END FUNCTION check_for_backup_request()
+
+
+
+#######################################################################
+##################### check_for_restore_request() #####################
+#######################################################################
+
+# Check if we have one or more filenames of the form
+# /.MNUBOOT-RESTORE-xxx or /.MNUBOOT-RESTOREHALT-xxx that indicate
+# a restore request.
+#
+# If so, remove ALL such files, and set MNU_RESTORE_ACTIVATED=1
+# and MNU_BACKUP_NAME to reflect the --LAST-- /.MNUBOOT-RESTORE-xxx
+# or /.MNUBOOT-RESTOREHALT-xxx file found.
+#
+# If RESTOREHALT was used, set HALT_AFTER_OPERATION=1
+
+check_for_restore_request()
+{
+   MNU_RESTORE_ACTIVATED=0
+   MNU_BACKUP_NAME_PREFIX="MNUBOOT-RESTORE-"
+   MNU_BACKUP_NAME=""
+
+   for ONE_FILE in /.${MNU_BACKUP_NAME_PREFIX}*
+   do
+      if [ -L $ONE_FILE ]
+      then
+         echo "$MY_CMD_WARN Removing logical link $ONE_FILE"
+         rm -f $ONE_FILE
+         sync_if_possible
+         continue
+      fi
+
+      if [ -f $ONE_FILE ]
+      then
+         MNU_BACKUP_NAME=`echo $ONE_FILE | \
+                          sed -e "s,/\.$MNU_BACKUP_NAME_PREFIX,,"`
+         MNU_RESTORE_ACTIVATED=1
+         rm -f $ONE_FILE
+         sync_if_possible
+      fi
+
+      if [ -d $ONE_FILE ]
+      then
+         echo "$MY_CMD_ERR Path $ONE_FILE is a directory"
+         mnuboot_exit 1
+      fi
+   done
+
+   MNU_BACKUP_NAME_PREFIX="MNUBOOT-RESTOREHALT-"
+
+   for ONE_FILE in /.${MNU_BACKUP_NAME_PREFIX}*
+   do
+      if [ -L $ONE_FILE ]
+      then
+         echo "$MY_CMD_WARN Removing logical link $ONE_FILE"
+         rm -f $ONE_FILE
+         sync_if_possible
+         continue
+      fi
+
+      if [ -f $ONE_FILE ]
+      then
+         MNU_BACKUP_NAME=`echo $ONE_FILE | \
+                          sed -e "s,/\.$MNU_BACKUP_NAME_PREFIX,,"`
+         MNU_RESTORE_ACTIVATED=1
+         HALT_AFTER_OPERATION=1
+         rm -f $ONE_FILE
+         sync_if_possible
+      fi
+
+      if [ -d $ONE_FILE ]
+      then
+         echo "$MY_CMD_ERR Path $ONE_FILE is a directory"
+         mnuboot_exit 1
+      fi
+   done
+
+} ### END FUNCTION check_for_restore_request()
+
+
+
+#######################################################################
+########################### do_ssh_cmd() ##############################
+#######################################################################
+
+# Run one command on the backup server using SSH.
+# Standard Output and Standard Error are saved in temp files.
+# If the command fails, displays Standard Error and exits the script.
+#
+# Relies on /root/.ssh/known_hosts to be good by default,
+# otherwise uses an empty known_hosts temp file if parameter
+# NO_KNOWN_HOSTS if specified.
+
+do_ssh_cmd()
+{
+   SSH_CMD=""
+   SSH_OPTIONS="-p $MNUBOOT_BNR_SSH_PORT -o BatchMode=yes"
+   SSH_OPTIONS="$SSH_OPTIONS -o StrictHostKeyChecking=no"
+   SSH_OPTIONS="$SSH_OPTIONS -o ConnectTimeout=$SSH_CONN_TIMEOUT"
+
+   if [ "X$1" = "XNO_KNOWN_HOSTS" ]
+   then
+      SSH_OPTIONS="$SSH_OPTIONS \
+                   -o UserKnownHostsFile=$MNUBOOT_TMP_SSH_KNOWN_HOSTS"
+
+      if [ "X$2" != "X" ]
+      then
+         if [ "X$3" != "X" ]
+         then
+            echo "$MY_CMD_ERR do_ssh_cmd has 2 parms max"
+            mnuboot_exit 1
+         fi
+
+         SSH_CMD="$2"
+      fi
+   else
+      if [ "X$1" != "X" ]
+      then
+         if [ "X$2" != "X" ]
+         then
+            echo "$MY_CMD_ERR do_ssh_cmd has parm after CMD"
+            mnuboot_exit 1
+         fi
+
+         SSH_CMD="$1"
+      fi
+   fi
+
+   if [ "X$SSH_CMD" = "X" ]
+   then
+      ssh $SSH_OPTIONS $MNU_TARGET "echo SUCCESSFUL" \
+          > $MNUBOOT_TMP_SSH_STDOUT 2> $MNUBOOT_TMP_SSH_STDERR || true
+   else
+      ssh $SSH_OPTIONS $MNU_TARGET "$SSH_CMD && echo SUCCESSFUL" \
+          > $MNUBOOT_TMP_SSH_STDOUT 2> $MNUBOOT_TMP_SSH_STDERR || true
+   fi
+
+   SSH_SUCCESS=`cat $MNUBOOT_TMP_SSH_STDOUT | tail -1 | \
+                grep SUCCESSFUL | wc -l`
+
+   if [ $SSH_SUCCESS -gt 0 ]
+   then
+      rm -f $MNUBOOT_TMP_SSH_STDOUT $MNUBOOT_TMP_SSH_STDERR
+      return
+   fi
+
+   if [ "X$SSH_CMD" = "X" ]
+   then
+      echo "$MY_CMD_ERR Test SSH failed"
+   else
+      echo "$MY_CMD_ERR SSH command \"$SSH_CMD\" failed"
+   fi
+
+   while read ONE_LINE
+   do
+      echo "$MY_CMD_ERR $ONE_LINE"
+   done < $MNUBOOT_TMP_SSH_STDERR
+
+   mnuboot_exit 1
+
+} # END FUNCTION do_ssh_cmd()
+
+
+
+#######################################################################
+##################### check_backup_host_spec() ########################
+#######################################################################
+
+# If MNUBOOT_BNR_HOST is a hostname, use the "host" command to
+# convert it to an IPv4 address. Check if the result looks like
+# an IPv4 address.
+#
+# The IPv4 check is NOT a tight check for validity!.
+
+check_backup_host_spec()
+{
+   HOST_IS_NAME=0
+   HOST_IS_IPV4=0
+
+   FOUND_CH=`expr index "$MNUBOOT_BNR_HOST" \
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"`
+
+   if [ $FOUND_CH -gt 0 ]
+   then
+      HOST_IS_NAME=1
+   else
+      FOUND_CH=`expr index "$MNUBOOT_BNR_HOST" \
+                           "abcdefghijklmnopqrstuvwxyz"`
+
+      if [ $FOUND_CH -gt 0 ]
+      then
+         HOST_IS_NAME=1
+      fi
+   fi
+
+   if [ $HOST_IS_NAME -ne 0 ]
+   then
+      host -R $NUM_DNS_RESOLV_RETRIES "$MNUBOOT_BNR_HOST" \
+            > $MNUBOOT_TMP_FILE1 2>&1
+
+      read R1 R2 R3 R4 R5 < $MNUBOOT_TMP_FILE1
+
+      rm -f $MNUBOOT_TMP_FILE1
+
+      if [ "X$R2"  = "Xhas"     -a \
+           "X$R3"  = "Xaddress" -a \
+           "X$R4" != "X"        -a \
+           "X$R5"  = "X"        ]
+      then
+         echo "$MY_CMD_OK Host name $MNUBOOT_BNR_HOST converted to $R4"
+         MNUBOOT_BNR_HOST="$R4"
+      else
+         echo "$MY_CMD_ERR Host spec name does not map to an IP"
+         mnuboot_exit 1
+      fi
+   fi
+
+   HOST_LOOKS_IP=`echo "$MNUBOOT_BNR_HOST"                         | \
+        grep "^[1-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*" | \
+        wc -l`
+
+   if [ $HOST_LOOKS_IP -eq 0 ]
+   then
+      echo "$MY_CMD_ERR Host spec does not look like an IPv4 address"
+      mnuboot_exit 1
+   fi
+
+} # END FUNCTION check_backup_host_spec()
+
+
+
+#######################################################################
+##################### check_prerequisites() ###########################
+#######################################################################
+
+# Checks prerequisites needed for a backup-on-boot OR
+# a restore-on-boot. Exits the script if not satisfied.
+
+check_prerequisites()
+{
+   ALL_BINS_EXISTS=1
+
+   for ONE_BIN in $BINS_REQ_LIST
+   do
+      ONE_BIN_EXISTS=`which $ONE_BIN 2> /dev/null`
+
+      if [ "X$ONE_BIN_EXISTS" = "X" ]
+      then
+         ALL_BINS_EXISTS=0
+         T_MSG="$MY_CMD_ERR Needed executable \"$ONE_BIN\""
+         T_MSG="$T_MSG cannot be found"
+         echo "$T_MSG"
+      fi
+   done
+
+   if [ $ALL_BINS_EXISTS -ne 1 ]
+   then
+      echo "$MY_CMD_ERR Not all required executables can be found"
+      mnuboot_exit 1
+   fi
+
+   if [ ! -d /$ROOT_SSH_DIR ]
+   then
+      echo "$MY_CMD_ERR Directory /$ROOT_SSH_DIR is missing"
+      mnuboot_exit 1
+   fi
+
+   if [ -r /$ROOT_SSH_DIR/id_dsa -a -r /$ROOT_SSH_DIR/id_dsa.pub ]
+   then
+      echo "$MY_CMD_OK Found SSH DSA keys for root account"
+   else
+      if [ -r /$ROOT_SSH_DIR/id_rsa -a -r /$ROOT_SSH_DIR/id_rsa.pub ]
+      then
+         echo "$MY_CMD_OK Found SSH RSA keys for root account"
+      else
+         echo "$MY_CMD_ERR SSH root account keys not found"
+         mnuboot_exit 1
+      fi
+   fi
+
+   if [ ! -r $MY_CONF_FILE ]
+   then
+      echo "$MY_CMD_ERR Cannot read file $MY_CONF_FILE"
+      mnuboot_exit 1
+   fi
+
+   . $MY_CONF_FILE
+
+   echo "$MY_CMD_OK Read file $MY_CONF_FILE"
+
+   ALL_VARS_DEFINED=1
+
+   for CONF_V in $MY_CONF_VAR_LIST
+   do
+      eval CONF_V_VAL="\$$CONF_V"
+
+      if [ "X$CONF_V_VAL" = "X" ]
+      then
+         ALL_VARS_DEFINED=0
+         echo "$MY_CMD_ERR Config variable $CONF_V not defined"
+      fi
+   done
+
+   if [ $ALL_VARS_DEFINED -eq 0 ]
+   then
+      echo "$MY_CMD_ERR Not all required config variables defined"
+      mnuboot_exit 1
+   fi
+
+   check_backup_host_spec
+
+   MNU_TARGET=$MNUBOOT_BNR_USER@$MNUBOOT_BNR_HOST
+
+   T_MSG="$MY_CMD_OK Waiting $SHORT_SLEEP seconds"
+   T_MSG="$T_MSG for the network to come up"
+   echo "$T_MSG"
+   sleep $SHORT_SLEEP
+   echo "$MY_CMD_OK Doing $PING_TRY_COUNT pings to target host"
+   ping -q -c $PING_TRY_COUNT $MNUBOOT_BNR_HOST
+
+   echo "$MY_CMD_OK Trying SSH to $MNU_TARGET"
+
+   do_ssh_cmd NO_KNOWN_HOSTS
+
+   echo "$MY_CMD_OK Test SSH successful"
+
+   MNU_BACKUP_LOG_DIR="$MNUBOOT_BNR_TOP_DIR/`hostname`"
+
+   MNU_BACKUP_DIR="$MNU_BACKUP_LOG_DIR/$MNU_BACKUP_NAME"
+
+} ### END FUNCTION check_prerequisites()
+
+
+
+#######################################################################
+########################## echo_and_log() #############################
+#######################################################################
+
+# Some of the backup clients have hard-to-access consoles.
+# To make monitoring of the backup/restore process easier, parts of
+# the log messages are both sent to the console and to a log file
+# located on the backup server.
+
+echo_and_log()
+{
+   LOG_TEXT="$1"
+
+   echo "$LOG_TEXT"
+   LOG_NOW=`date +'%Y%m%d-%H%M%S'`
+
+   echo "$LOG_NOW $LOG_TEXT" |                           \
+       ssh -p $MNUBOOT_BNR_SSH_PORT -o BatchMode=yes     \
+           -o ConnectTimeout=$SSH_CONN_TIMEOUT           \
+           -o StrictHostKeyChecking=no    $MNU_TARGET    \
+           "cat >> $MNU_REMOTE_LOG"
+} ### END FUNCTION echo_and_log()
+
+
+
+#######################################################################
+##################### calc_ramdisk_size() #############################
+#######################################################################
+
+# Calculates the required RAM size based on the directories and files
+# we need to copy there, a RAMDISK_TARGET_PERCENT_USE,
+# how much free RAM we have, and a RAM minimum safety margin
+# set in RAM_FREE_MB_NEEDED. Sets RAMDISK_SIZE if successful.
+
+calc_ramdisk_size()
+{
+   cd /
+
+   RAMDISK_KB_NEEDED=0
+
+   echo_and_log "$MY_CMD_OK Calculating needed RAM disk space"
+
+   T_MSG="$MY_CMD_OK    for dirs:"
+
+   for D in $WHOLE_DIRS_TO_INCLUDE $ROOT_SSH_DIR
+   do
+      T_MSG="$T_MSG /$D"
+
+      du -ks /$D      > $MNUBOOT_TMP_FILE2
+      read PART_KB T2 < $MNUBOOT_TMP_FILE2
+
+      rm -f $MNUBOOT_TMP_FILE2
+
+      RAMDISK_KB_NEEDED=`expr $RAMDISK_KB_NEEDED + $PART_KB`
+   done
+
+   echo_and_log "$T_MSG"
+
+   T_MSG="$MY_CMD_OK Needed RAMdisk size so far: $RAMDISK_KB_NEEDED KB"
+   echo_and_log "$T_MSG"
+
+   echo_and_log "$MY_CMD_OK Adding size of required subset of /usr/lib"
+
+   cd /usr/lib
+   ls > $MNUBOOT_TMP_FILE1
+
+   while read ONE_F
+   do
+      TO_EXCLUDE=0
+
+      for EXCL_F in $USR_LIB_SUBTREES_TO_EXCLUDE
+      do
+         if [ "$ONE_F" = "$EXCL_F" ]
+         then
+            TO_EXCLUDE=1
+            break
+         fi
+      done
+
+      if [ $TO_EXCLUDE -ne 0 ]
+      then
+         continue
+      fi
+
+      du -ks $ONE_F   > $MNUBOOT_TMP_FILE2 2> /dev/null
+      read PART_KB T2 < $MNUBOOT_TMP_FILE2
+
+      rm -f $MNUBOOT_TMP_FILE2
+
+      RAMDISK_KB_NEEDED=`expr $RAMDISK_KB_NEEDED + $PART_KB`
+
+   done < $MNUBOOT_TMP_FILE1
+
+   rm -f $MNUBOOT_TMP_FILE1
+
+   EFF_LIB_LIST=""
+
+   for ONE_LIB_PATTERN in $USR_LIB64_LIBS_TO_INCLUDE
+   do
+      ONE_PAT_LIST=`ls /usr/lib64/${ONE_LIB_PATTERN}*   2> /dev/null`
+      EFF_LIB_LIST="$EFF_LIB_LIST $ONE_PAT_LIST"
+   done
+
+   for ONE_LIB in $EFF_LIB_LIST
+   do
+      du -ks $ONE_LIB > $MNUBOOT_TMP_FILE2 2> /dev/null
+      read PART_KB T2 < $MNUBOOT_TMP_FILE2
+
+      rm -f $MNUBOOT_TMP_FILE2
+
+      RAMDISK_KB_NEEDED=`expr $RAMDISK_KB_NEEDED + $PART_KB`
+   done
+
+   echo_and_log "$MY_CMD_OK RAM disk needed size: $RAMDISK_KB_NEEDED KB"
+
+   RAMDISK_KB_NEEDED=`expr $RAMDISK_KB_NEEDED '*' 100`
+   RAMDISK_KB_NEEDED=`expr $RAMDISK_KB_NEEDED / \
+                           $RAMDISK_TARGET_PERCENT_USE`
+
+   T_MSG="$MY_CMD_OK For target use $RAMDISK_TARGET_PERCENT_USE %,"
+   T_MSG="$T_MSG need RAM disk = $RAMDISK_KB_NEEDED KB"
+   echo_and_log "$T_MSG"
+
+   # Here we use 1000 instead of 1024 for a bit of extra safety
+   RAMDISK_MB_NEEDED=`expr $RAMDISK_KB_NEEDED / 1000`
+
+   cat /proc/meminfo | \
+      tr '[:upper:]' '[:lower:]' | \
+      grep "^memfree:"                  > $MNUBOOT_TMP_FILE1
+
+   read T1 MEM_FREE_1 MEM_FREE_2 < $MNUBOOT_TMP_FILE1
+
+   rm -f $MNUBOOT_TMP_FILE1
+
+   if [ "X$MEM_FREE_2" != "Xkb" ]
+   then
+      echo_and_log "$MY_CMD_ERR Cannot parse output of /proc/meminfo !"
+      mnuboot_exit 1
+   fi
+
+   MEM_FREE_MB=`expr $MEM_FREE_1 / 1024`
+
+   T_MSG="$MY_CMD_OK RAM disk: $RAMDISK_MB_NEEDED MB"
+   T_MSG="$T_MSG  Free RAM: $MEM_FREE_MB MB"
+   T_MSG="$T_MSG  Min. margin needed: $RAM_FREE_MB_NEEDED MB"
+
+   echo_and_log "$T_MSG"
+
+   RAM_MB_NEEDED=`expr $RAMDISK_MB_NEEDED + $RAM_FREE_MB_NEEDED`
+
+   if [ $RAM_MB_NEEDED -gt $MEM_FREE_MB ]
+   then
+      echo_and_log "$MY_CMD_ERR Not enough RAM to allocate RAMDISK"
+      mnuboot_exit 1
+   fi
+
+   RAMDISK_SIZE="${RAMDISK_MB_NEEDED}m"
+
+} ### END FUNCTION calc_ramdisk_size()
+
+
+
+#######################################################################
+##################### build_rootfs_ramdisk() ##########################
+#######################################################################
+
+# Creates a filesystem in RAM, and copies all sorts of things to it
+# that we will need, so that we can use it as a "root" filesystem
+# while we do R/W-work on the TRUE filesystem(s) including the root FS.
+
+build_rootfs_ramdisk()
+{
+   BLD_RAM_ROOTFS_RC=0
+
+   if [ -L $RAMDISK_MOUNT_POINT ]
+   then
+      T_MSG="$MY_CMD_ERR Path $RAMDISK_MOUNT_POINT must be"
+      T_MSG="$T_MSG a directory, not a logical link"
+      echo_and_log "$T_MSG"
+      return
+   fi
+
+   if [ ! -e $RAMDISK_MOUNT_POINT ]
+   then
+      mkdir $RAMDISK_MOUNT_POINT
+   fi
+
+   if [ ! -d $RAMDISK_MOUNT_POINT ]
+   then
+      T_MSG="$MY_CMD_ERR Path $RAMDISK_MOUNT_POINT must be a directory"
+      echo_and_log "$T_MSG"
+      return
+   fi
+
+   calc_ramdisk_size
+
+   echo_and_log "$MY_CMD_OK Creating RAM disk for root fs"
+
+   mount -t tmpfs -o size=$RAMDISK_SIZE tmpfs $RAMDISK_MOUNT_POINT
+
+   cd /
+
+   echo -n "$MY_CMD_OK Copying to RAM disk:"
+
+   for D in $WHOLE_DIRS_TO_INCLUDE $ROOT_SSH_DIR
+   do
+      echo -n " /$D"
+      tar cpf - $D | (cd $RAMDISK_MOUNT_POINT; tar xpf - )
+   done
+
+   echo ""
+
+   rm -f $RAMDISK_MOUNT_POINT/$ROOT_SSH_DIR/known_hosts
+
+   for D in $DIRLIST_TO_CREATE
+   do
+      mkdir -p $RAMDISK_MOUNT_POINT/$D
+   done
+
+   chmod 1777 $RAMDISK_MOUNT_POINT/tmp
+
+   echo "$MY_CMD_OK Building /usr/lib64 subset in RAM disk"
+
+   mkdir -p $RAMDISK_MOUNT_POINT/usr/lib64
+
+   for ONE_LIB_PATTERN in $USR_LIB64_LIBS_TO_INCLUDE
+   do
+      ONE_PAT_LIST=`ls /usr/lib64/${ONE_LIB_PATTERN}*   2> /dev/null`
+      EFF_LIB_LIST="$EFF_LIB_LIST $ONE_PAT_LIST"
+   done
+
+   for ONE_LIB in $EFF_LIB_LIST
+   do
+      cp -p $ONE_LIB $RAMDISK_MOUNT_POINT/usr/lib64
+   done
+
+   echo "$MY_CMD_OK Building /usr/lib subset in RAM disk"
+
+   cd /usr/lib
+   ls > $MNUBOOT_TMP_FILE1
+
+   while read ONE_F
+   do
+      TO_EXCLUDE=0
+
+      for EXCL_F in $USR_LIB_SUBTREES_TO_EXCLUDE
+      do
+         if [ "$ONE_F" = "$EXCL_F" ]
+         then
+            TO_EXCLUDE=1
+            break
+         fi
+      done
+
+      if [ $TO_EXCLUDE -ne 0 ]
+      then
+         continue
+      fi
+
+      tar cpf - $ONE_F | ( cd $RAMDISK_MOUNT_POINT/usr/lib; tar xpf - )
+   done < $MNUBOOT_TMP_FILE1
+
+   rm -f $MNUBOOT_TMP_FILE1
+
+   df $RAMDISK_MOUNT_POINT | tail -1 > $MNUBOOT_TMP_FILE1
+
+   read T1 FS_SIZE T3 T4 FS_USE T6 < $MNUBOOT_TMP_FILE1
+   rm -f $MNUBOOT_TMP_FILE1
+
+   T_MSG="$MY_CMD_OK Actual stats for RAM disk:"
+   T_MSG="$T_MSG   Size=$FS_SIZE KB   Used=$FS_USE"
+   echo_and_log "$T_MSG"
+
+   BLD_RAM_ROOTFS_RC=1
+
+} ### END FUNCTION build_rootfs_ramdisk()
+
+
+
+#######################################################################
+##################### stop_useless_processes() ########################
+#######################################################################
+
+# Stop processes that are not needed for backup and/or restore,
+# and that may interfere by keeping extra files open.
+
+stop_useless_processes()
+{
+   echo_and_log "$MY_CMD_OK Starting to stop useless processes"
+
+   PS_LIST=`ps -eo pid,euid,args | grep rpcbind | grep -v grep | \
+            awk '{ print $1 }'`
+
+   if [ "X$PS_LIST" != "X" ]
+   then
+      echo -n "$MY_CMD_OK Killing rpcbind-related processes"
+      echo    " and waiting $SHORT_SLEEP seconds"
+
+      service rpcbind stop > /dev/null 2>&1
+      sleep $SHORT_SLEEP
+   fi
+
+   echo_and_log "$MY_CMD_OK Making sure ntpdate is not running"
+
+   while [ 1 -eq 1 ]
+   do
+      PS_LIST=`ps -eo pid,euid,args | grep ntpdate | grep -v grep | \
+               awk '{ print $1 }'`
+
+      if [ "X$PS_LIST" != "X" ]
+      then
+         echo -n "$MY_CMD_OK Waiting $SHORT_SLEEP seconds"
+         echo    " for ntpdate to finish..."
+         sleep $SHORT_SLEEP
+         continue
+      fi
+
+      echo "$MY_CMD_OK No ntpdate processes, proceeding..."
+      break
+   done
+
+   PS_LIST=`ps -eo pid,euid,args | grep udevd | grep -v grep | \
+            awk '{ print $1 }'`
+
+   if [ "X$PS_LIST" != "X" ]
+   then
+      echo "$MY_CMD_OK Killing udev processes..."
+
+      if [ -f /etc/init.d/udev ]
+      then
+         service udev stop > /dev/null 2>&1
+      else
+         kill -9 $PS_LIST
+      fi
+
+      while [ 1 -eq 1 ]
+      do
+         PS_LIST=`ps -eo pid,euid,args | grep udevd | grep -v grep | \
+                  awk '{ print $1 }'`
+
+         if [ "X$PS_LIST" != "X" ]
+         then
+             echo -n "$MY_CMD_OK Waiting $SHORT_SLEEP seconds"
+             echo    " for udev to finish..."
+             sleep $SHORT_SLEEP
+             continue
+         fi
+
+         echo "$MY_CMD_OK No udev processes, proceeding..."
+         break
+      done
+   fi
+
+   echo_and_log "$MY_CMD_OK All useless processes stoppped"
+
+} ### END FUNCTION stop_useless_processes()
+
+
+
+#######################################################################
+##################### unmount_all_but_root_fs() #######################
+#######################################################################
+
+# Do "lazy" unmounts of all mounted filesystems except /.
+#
+# To improve behavior for potential mounts-within-mounts,
+# sorts the list of filesystems by the string length of the
+# mount point name, and unmounts the longest names first.
+#
+# In all cases, /proc is unmounted last.
+
+unmount_all_but_root_fs()
+{
+   echo_and_log "$MY_CMD_OK Starting unmount of all but the root FS"
+
+   # Last log through SSH is done until we switch to the new root
+   # filesystem in RAM. Clear out the last useful temp file
+   # left on the real filesystem.
+
+   rm -f $MNUBOOT_TMP_SSH_KNOWN_HOSTS
+
+   cat /proc/mounts > $MNUBOOT_TMP_UNMOUNT1
+
+   echo -n "$MY_CMD_OK Doing unmount:"
+
+   while [ 1 -eq 1 ]
+   do
+      FS_TO_UNMOUNT=""
+      FS_LEN=0
+
+      while read FS_KIND FS_MOUNT FS_TYPE FS_OPTS
+      do
+         # Test for all filesystems that should not be unmounted
+
+         if [ "X$FS_MOUNT" = "X$RAMDISK_MOUNT_POINT" ]
+         then
+            continue
+         fi
+
+         if [ "X$FS_MOUNT" = "X/" ]
+         then
+            continue
+         fi
+
+         if [ "X$FS_TYPE"  = "Xrootfs" ]
+         then
+            continue
+         fi
+
+         if [ "X$FS_TYPE"  = "Xproc" ]
+         then
+            continue
+         fi
+
+         FS_NEW_LEN=`expr length "$FS_MOUNT"`
+
+         if [ $FS_NEW_LEN -le $FS_LEN ]
+         then
+            # Filesystem mount point is not the longest so far, skip
+            continue
+         fi
+
+         FS_TO_UNMOUNT="$FS_MOUNT"
+         FS_LEN=$FS_NEW_LEN
+      done < $MNUBOOT_TMP_UNMOUNT1
+
+      if [ "X$FS_TO_UNMOUNT" = "X" ]
+      then
+         break
+      else
+         rm -f $MNUBOOT_TMP_UNMOUNT2
+
+         while read FS_KIND FS_MOUNT FS_TYPE FS_OPTS
+         do
+            if [ "X$FS_TO_UNMOUNT" != "X$FS_MOUNT" ]
+            then
+               echo "$FS_KIND $FS_MOUNT $FS_TYPE $FS_OPTS" \
+                    >> $MNUBOOT_TMP_UNMOUNT2
+            fi
+         done < $MNUBOOT_TMP_UNMOUNT1
+
+         cat < $MNUBOOT_TMP_UNMOUNT2 > $MNUBOOT_TMP_UNMOUNT1
+      fi
+
+      echo -n " $FS_TO_UNMOUNT"
+      umount -l $FS_TO_UNMOUNT
+   done
+
+   rm -f $MNUBOOT_TMP_UNMOUNT1 $MNUBOOT_TMP_UNMOUNT2
+
+   echo ""
+
+   echo "$MY_CMD_OK Doing unmount of FS /proc"
+   umount -l /proc
+
+   echo "$MY_CMD_OK All unmounts but root FS done"
+
+} ### END FUNCTION unmount_all_but_root_fs()
+
+
+
+#######################################################################
+##################### switch_to_ramdisk_rootfs() ######################
+#######################################################################
+
+# Make the RAMDISK filesystem the root filesystem for "new" processing,
+# and do a lazy unmount of the real filesystem.
+#
+# After this, we still have some open files and pseudo-files
+# on the real root filesystem (notably by "init" and "bash"),
+# so we must thread with great care, especially
+# for the restore operation.
+
+switch_to_ramdisk_rootfs()
+{
+   echo "$MY_CMD_OK Switching to RAM disk root fs"
+   cd $RAMDISK_MOUNT_POINT
+   mkdir old-root-mount
+   pivot_root . old-root-mount
+
+#  This has been used in the past (with great difficulty)
+#  to do debugging right in the middle of the boot phase.
+#
+#  exec usr/sbin/chroot . sh < dev/console > dev/console 2>&1
+
+   cd /
+   mount -t proc -o rw,nosuid,nodev,noexec,relatime proc /proc
+
+   umount -l /old-root-mount
+   rmdir /old-root-mount
+
+   echo_and_log "$MY_CMD_OK Switch to RAM disk complete"
+
+} ### END FUNCTION switch_to_ramdisk_rootfs()
+
+
+
+#######################################################################
+####################### capture_fs_info() #############################
+#######################################################################
+
+# Based on the current filesystem state (before we start unmounting
+# stuff), capture lots of useful information on the system.
+# Not all of this is needed by the restore procedure, but it may be
+# useful to a sysadmin that needs to restore the backup manually,
+# possibly into a different disk/filesystem layout than the original
+# setup.
+
+capture_fs_info()
+{
+   echo_and_log "$MY_CMD_OK Capturing filesystem and device info"
+
+   mkdir $FS_INFO_DIR
+
+   cat /proc/mounts > $FS_INFO_DIR/proc-mounts.txt
+   cat /etc/fstab   > $FS_INFO_DIR/fstab.txt
+   fdisk -l         > $FS_INFO_DIR/fdisk.txt 2>&1
+   df -h            > $FS_INFO_DIR/df-h.txt  2>&1
+
+   MY_VGDISPLAY=`which vgdisplay 2> /dev/null`
+   MY_LVDISPLAY=`which lvdisplay 2> /dev/null`
+   MY_PVDISPLAY=`which pvdisplay 2> /dev/null`
+   MY_DPKG=`which dpkg 2> /dev/null`
+   MY_RPM=`which rpm   2> /dev/null`
+
+   # Capture LVM configuration information if LVM software installed
+
+   if [ "X$MY_VGDISPLAY" != "X" ]
+   then
+      vgdisplay    > $FS_INFO_DIR/vgdisplay-long.txt  2>&1
+      vgdisplay -c > $FS_INFO_DIR/vgdisplay-short.txt 2>&1
+   fi
+
+   if [ "X$MY_LVDISPLAY" != "X" ]
+   then
+      lvdisplay    > $FS_INFO_DIR/lvdisplay-long.txt  2>&1
+      lvdisplay -c > $FS_INFO_DIR/lvdisplay-short.txt 2>&1
+   fi
+
+   if [ "X$MY_PVDISPLAY" != "X" ]
+   then
+      pvdisplay    > $FS_INFO_DIR/pvdisplay-long.txt  2>&1
+      pvdisplay -c > $FS_INFO_DIR/pvdisplay-short.txt 2>&1
+   fi
+
+   # Debian-specific: Capture the list of packages installed
+
+   if [ "X$MY_DPKG" != "X" ]
+   then
+      dpkg -l > $FS_INFO_DIR/dpkg-l.txt
+   fi
+
+   if [ "X$MY_RPM" != "X" ]
+   then
+      rpm -qa                  | \
+                            sort > $FS_INFO_DIR/rpm-versions.txt
+
+      rpm -qa --qf "%{NAME}\n" | \
+                            sort > $FS_INFO_DIR/rpm-no-versions.txt
+   fi
+
+   touch $FS_INFO_DIR/fs-info.txt
+
+   FS_IDX=0
+
+   # Loop over the list of mounted file systems.
+
+   while read ORIG_FS_DEV FS_MOUNT FS_TYPE FS_OPTS
+   do
+      FS_DEV="$ORIG_FS_DEV"  # Orig value is initial working value
+
+      if [ "X$FS_TYPE" != "Xext2" -a \
+           "X$FS_TYPE" != "Xext3" -a \
+           "X$FS_TYPE" != "Xext4" ]
+      then
+         # Skip filesystems we do not know how to re-make!
+         echo_and_log "$MY_CMD_OK Skipping FS $FS_DEV of type $FS_TYPE"
+         continue
+      fi
+
+      if [ "X$FS_DEV" = "X/dev/root" ]
+      then
+         FS_DEV=`cat /proc/cmdline | \
+                 sed -e 's/.* root=//' -e 's/ .*//'`
+
+         echo_and_log "$MY_CMD_OK Root fs mapped at boot to $FS_DEV"
+      fi
+
+      if [ -L $FS_DEV ]
+      then
+         # FS mount point is a logical link
+
+         # If mount point is done by UUID, set IS_UUID != 0
+         IS_UUID=`echo "$FS_DEV" | grep "^/dev/disk/by-uuid/" | wc -l`
+
+         # Follow logical link to something closer to a real device
+         PREV_FS_DEV="$FS_DEV"
+         FS_DEV=`readlink -e $FS_DEV`
+
+         echo_and_log "$MY_CMD_OK FS link $PREV_FS_DEV -> $FS_DEV"
+      else
+         IS_UUID="0"
+      fi
+
+      FS_IDX=`expr $FS_IDX + 1`
+
+      TUNE_OUTFILE="$FS_INFO_DIR/tune2fs-dev-${FS_IDX}.txt"
+
+      tune2fs -l $FS_DEV > $TUNE_OUTFILE 2>&1
+
+      if [ "X$IS_UUID" != "X0" ]
+      then
+         # Obtain the UUID of the filesystem, which may be referenced
+         # in various files on the system (/boot/grub/grub.cfg,
+         # /etc/fstab, etc.). Upon restore, if we do a mkfs,
+         # we will reset the UUID to this value after
+         # filesystem creation so that all is coherent.
+
+         FS_UUID=`cat $TUNE_OUTFILE | grep " UUID:" | \
+                  sed -e 's/.* UUID:[[:space:]]*//'`
+      else
+         FS_UUID="NO_UUID"
+      fi
+
+      FS_LABEL=`e2label $FS_DEV`
+
+      if [ "X$FS_LABEL" = "X" ]
+      then
+         FS_LABEL="NO_LABEL"
+      fi
+
+      echo "$FS_IDX $FS_DEV $FS_MOUNT $FS_TYPE $FS_UUID $FS_LABEL" \
+           >> $FS_INFO_DIR/fs-info.txt
+
+   done < /proc/mounts
+
+   scp -P $MNUBOOT_BNR_SSH_PORT $FS_INFO_DIR/*.txt            \
+                                $MNU_TARGET:$MNU_BACKUP_DIR
+
+} # END FUNCTION capture_fs_info()
+
+
+
+#######################################################################
+####################### do_on_boot_backup() ###########################
+#######################################################################
+
+# The main event: actual backup of the system during the boot phase.
+
+do_on_boot_backup()
+{
+   MNU_BACKUP_EXIT_RC=1
+
+   do_ssh_cmd "mkdir -p $MNU_BACKUP_DIR"
+
+   echo_and_log "$MY_CMD_OK Creating backup named \"$MNU_BACKUP_NAME\""
+
+   do_ssh_cmd "rm -f $MNU_BACKUP_DIR/BACKUP-COMPLETE"
+   do_ssh_cmd "touch $MNU_BACKUP_DIR/BACKUP-START"
+
+   build_rootfs_ramdisk
+
+   if [ "X$BLD_RAM_ROOTFS_RC" != "X1" ]
+   then
+      echo_and_log "$MY_CMD_ERR Building RAMDISK failed"
+      return
+   fi
+
+   capture_fs_info
+
+   stop_useless_processes
+   unmount_all_but_root_fs
+   switch_to_ramdisk_rootfs
+
+#  echo "$MY_CMD_OK Starting interactive shell..."
+#  cd /
+#  sh < /dev/console > /dev/console 2>&1
+#  echo "$MY_CMD_OK Interactive shell finished, resuming..."
+
+   # During this loop, FS_UUID may be non-null depending on
+   # the filesystem being backed up.
+
+   while read FS_IDX FS_DEV FS_MOUNT FS_TYPE FS_UUID
+   do
+      if [ "X$FS_UUID" = "XNO_UUID" ]
+      then
+         FS_UUID=""
+      fi
+
+      if [ "X$FS_MOUNT" = "X/" ]
+      then
+         # We need to do some specific actions on the root FS
+         # after the while loop.
+
+         FS_ROOT_TYPE="$FS_TYPE"
+         FS_ROOT_DEV="$FS_DEV"
+      fi
+
+      echo_and_log "$MY_CMD_OK Start backup no $FS_IDX of $FS_DEV ..."
+
+      mount -t $FS_TYPE $FS_DEV /mnt-tmp
+
+      cd /mnt-tmp
+
+      # Generate a compressed TAR file of the filesystem,
+      # and send it on the fly to the backup server.
+
+      tar cpzf - . | \
+         ssh -p $MNUBOOT_BNR_SSH_PORT -o BatchMode=yes  \
+             -o ConnectTimeout=$SSH_CONN_TIMEOUT        \
+             -o StrictHostKeyChecking=no $MNU_TARGET    \
+             "cat > $MNU_BACKUP_DIR/backup-dev-${FS_IDX}.tar.gz"
+
+      cd /
+      umount /mnt-tmp
+
+   done < /$FS_INFO_DIR_BASE/fs-info.txt
+
+   do_ssh_cmd "touch $MNU_BACKUP_DIR/BACKUP-COMPLETE"
+
+   if [ "X$FS_ROOT_DEV" != "X" ]
+   then
+      echo "$MY_CMD_OK Removing run leftovers in root FS"
+
+      mount -t $FS_ROOT_TYPE $FS_ROOT_DEV /mnt-tmp
+
+      rm -rf /mnt-tmp${RAMDISK_MOUNT_POINT}
+      umount /mnt-tmp
+   fi
+
+   echo_and_log "$MY_CMD_OK Backup creation complete!"
+
+   if [ $HALT_AFTER_OPERATION -eq 0 ]
+   then
+      T_MSG="$MY_CMD_OK Sleeping $SLEEP_BEFORE_REBOOT seconds"
+      T_MSG="$T_MSG before reboot..."
+      echo "$T_MSG"
+
+      sleep $SLEEP_BEFORE_REBOOT
+
+      reboot -f
+   else
+      T_MSG="$MY_CMD_OK Sleeping $SLEEP_BEFORE_REBOOT seconds"
+      T_MSG="$T_MSG before HALT..."
+      echo "$T_MSG"
+
+      sleep $SLEEP_BEFORE_REBOOT
+
+      poweroff -f
+   fi
+
+   MNU_BACKUP_EXIT_RC=0
+
+} ### END FUNCTION do_on_boot_backup()
+
+
+
+#######################################################################
+####################### do_on_boot_restore() ##########################
+#######################################################################
+
+# The main event: actual restore of the system during the boot phase.
+
+do_on_boot_restore()
+{
+   MNU_RESTORE_EXIT_RC=1
+
+   do_ssh_cmd "mkdir -p $MNU_BACKUP_LOG_DIR"
+
+   T_MSG="$MY_CMD_OK Overall restore of backup \"$MNU_BACKUP_NAME\""
+   echo_and_log="$T_MSG"
+
+   do_ssh_cmd "cat $MNU_BACKUP_DIR/BACKUP-COMPLETE"
+
+   if [ $SSH_SUCCESS -le 0 ]
+   then
+      echo_and_log "$MY_CMD_ERR Backup directory not COMPLETE"
+      return
+   fi
+
+   echo_and_log "$MY_CMD_OK Backup directory found with COMPLETE flag"
+
+   build_rootfs_ramdisk
+
+   if [ "X$BLD_RAM_ROOTFS_RC" != "X1" ]
+   then
+      echo_and_log "$MY_CMD_ERR Building RAMDISK failed"
+      return
+   fi
+
+   stop_useless_processes
+   unmount_all_but_root_fs
+   switch_to_ramdisk_rootfs
+
+   # Obtain the list of filesystems to restore
+
+   mkdir /$FS_INFO_DIR_BASE
+
+   ssh -p $MNUBOOT_BNR_SSH_PORT -o BatchMode=yes          \
+       -o ConnectTimeout=$SSH_CONN_TIMEOUT                \
+       -o StrictHostKeyChecking=no          $MNU_TARGET   \
+       "cat $MNU_BACKUP_DIR/fs-info.txt"                  \
+            > /$FS_INFO_DIR_BASE/fs-info.txt
+
+   # Pre-load, in shell variables, the values describing the list
+   # of filesystems.
+   #
+   # We need to do this before the NEXT while loop, because the
+   # "while read do done < file" construct seems to use UNIX pipes
+   # internally. When we reach the restore on the root filesystem,
+   # we do an "rm -rf" in that filesystem before the actual restore.
+   # Since our parent processes Bash and Init are somewhat still bound
+   # to that filesystem instead of our Ramdisk, and the pipe gets
+   # killed during the "rm -rf". This is why the NEXT while loop
+   # only relies on shell variables.
+
+   while read FS_IDX FS_DEV FS_MOUNT FS_TYPE FS_UUID FS_LABEL
+   do
+      if [ "X$FS_UUID" = "XNO_UUID" ]
+      then
+         FS_UUID=""
+      fi
+
+      if [ "X$FS_LABEL" = "XNO_LABEL" ]
+      then
+         FS_LABEL=""
+      fi
+
+      FS_DEV_VAR="FS_DEV_${FS_IDX}"
+      FS_MOUNT_VAR="FS_MOUNT_${FS_IDX}"
+      FS_TYPE_VAR="FS_TYPE_${FS_IDX}"
+      FS_UUID_VAR="FS_UUID_${FS_IDX}"
+      FS_LABEL_VAR="FS_LABEL_${FS_IDX}"
+
+      eval $FS_DEV_VAR="$FS_DEV"
+      eval $FS_MOUNT_VAR="$FS_MOUNT"
+      eval $FS_TYPE_VAR="$FS_TYPE"
+      eval $FS_UUID_VAR="$FS_UUID"
+      eval $FS_LABEL_VAR="$FS_LABEL"
+
+   done < /$FS_INFO_DIR_BASE/fs-info.txt
+
+   FS_IDX=0
+
+   mkdir -p /mnt-tmp
+
+   # Loop over filesystems to restore them.
+   # We loop using shell variables for the reasons described above.
+
+   while [ 1 -eq 1 ]
+   do
+      FS_IDX=`expr $FS_IDX + 1`
+
+      FS_DEV_VAR="FS_DEV_${FS_IDX}"
+      FS_MOUNT_VAR="FS_MOUNT_${FS_IDX}"
+      FS_TYPE_VAR="FS_TYPE_${FS_IDX}"
+      FS_UUID_VAR="FS_UUID_${FS_IDX}"
+      FS_LABEL_VAR="FS_LABEL_${FS_IDX}"
+
+      eval FS_DEV_VAL="\$$FS_DEV_VAR"
+      eval FS_MOUNT_VAL="\$$FS_MOUNT_VAR"
+      eval FS_TYPE_VAL="\$$FS_TYPE_VAR"
+      eval FS_UUID_VAL="\$$FS_UUID_VAR"
+      eval FS_LABEL_VAL="\$$FS_LABEL_VAR"
+
+      if [ "X$FS_DEV_VAL" = "X" ]
+      then
+         break
+      fi
+
+      T_MSG="$MY_CMD_OK Preparing for restore on device $FS_DEV_VAL"
+      echo_and_log "$T_MSG"
+
+      if [ "X$FS_MOUNT_VAL" = "X/" -o "X$FS_MOUNT_VAL" = "X/usr" ]
+      then
+         T_MSG="$MY_CMD_OK Doing temp mount of FS on $FS_DEV_VAL"
+         echo_and_log "$T_MSG"
+
+         mount -t $FS_TYPE_VAL $FS_DEV_VAL /mnt-tmp
+
+         echo_and_log "$MY_CMD_OK Doing MV/RM on FS on $FS_DEV_VAL"
+
+         T_MSG="$MY_CMD_OK Messages from init that its config"
+         T_MSG="$T_MSG is deleted may occur here!"
+         echo_and_log "$T_MSG"
+
+         cd /mnt-tmp
+
+         F_LIST=`ls -a`
+         mkdir MNUBOOT-REMOVED
+
+         for F in $F_LIST
+         do
+            if [ "X$F" = "X."  -o \
+                 "X$F" = "X.." -o \
+                 "X$F" = "Xlost+found" ]
+            then
+               continue
+            fi
+
+            mv $F MNUBOOT-REMOVED
+         done
+
+         echo_and_log "$MY_CMD_OK Recursive RM of MNUBOOT-REMOVED"
+         rm -rf MNUBOOT-REMOVED
+      else
+         T_MSG="$MY_CMD_OK Creating new $FS_TYPE_VAL filesystem"
+         T_MSG="$T_MSG on $FS_DEV_VAL"
+         echo_and_log "$T_MSG"
+
+         mkfs.$FS_TYPE_VAL -q $FS_DEV_VAL
+
+         if [ "X$FS_UUID_VAL" != "X" ]
+         then
+            echo_and_log "$MY_CMD_OK Setting FS UUID on $FS_DEV_VAL"
+            tune2fs -U $FS_UUID_VAL $FS_DEV_VAL
+         fi
+
+         if [ "X$FS_LABEL_VAL" != "X" ]
+         then
+            echo_and_log "$MY_CMD_OK Setting FS label on $FS_DEV_VAL"
+            tune2fs -L $FS_LABEL_VAL $FS_DEV_VAL
+         fi
+
+         T_MSG="$MY_CMD_OK Doing temp mount of FS on $FS_DEV_VAL"
+         echo_and_log "$T_MSG"
+         mount -t $FS_TYPE_VAL $FS_DEV_VAL /mnt-tmp
+      fi
+
+      cd /mnt-tmp
+
+      echo_and_log "$MY_CMD_OK Starting actual restore on $FS_DEV_VAL"
+
+      ssh -p $MNUBOOT_BNR_SSH_PORT -o BatchMode=yes              \
+          -o ConnectTimeout=$SSH_CONN_TIMEOUT                    \
+          -o StrictHostKeyChecking=no               $MNU_TARGET  \
+          "cat $MNU_BACKUP_DIR/backup-dev-${FS_IDX}.tar.gz"      \
+          | tar xpzf - --exclude=lost+found
+
+      if [ "X$FS_MOUNT_VAL" = "X/" ]
+      then
+         echo_and_log "$MY_CMD_OK Removing leftovers in root FS"
+         rm -rf $RAMDISK_MOUNT_POINT_BASE
+      fi
+
+      if [ -f etc/selinux/config ]
+      then
+         T_MSG="$MY_CMD_OK Restore contains SElinux config file,"
+         T_MSG="$T_MSG activating SElinux relabel on boot."
+         echo_and_log "$T_MSG"
+
+         touch .autorelabel
+      fi
+
+      T_MSG="$MY_CMD_OK Stats on device $FS_DEV_VAL after restore"
+      echo_and_log "$T_MSG"
+
+      DF_OUTFILE=/tmp/df-out.tmp1.$$
+
+      df -h /mnt-tmp > $DF_OUTFILE 2>&1
+
+      while read T1
+      do
+         echo_and_log "$MY_CMD_OK    $T1"
+      done < $DF_OUTFILE
+
+      rm -f $DF_OUTFILE
+
+      cd /
+      umount /mnt-tmp
+
+   done
+
+   echo_and_log "$MY_CMD_OK Doing mounts for grub-install"
+
+   # mount / (and /boot if necessary) under /mnt-tmp
+
+   BOOT_DEV=""
+
+   while read FS_IDX FS_DEV FS_MOUNT FS_TYPE FS_UUID
+   do
+      if [ "X$FS_MOUNT" = "X/" ]
+      then
+         echo_and_log "$MY_CMD_OK Tmp mount of /"
+         mount -t $FS_TYPE $FS_DEV /mnt-tmp
+         BOOT_DEV="$FS_DEV"
+         break
+      fi
+   done < /$FS_INFO_DIR_BASE/fs-info.txt
+
+   while read FS_IDX FS_DEV FS_MOUNT FS_TYPE FS_UUID
+   do
+      for ONE_M in $GRUB_INST_MOUNT_LIST
+      do
+         if [ "X$FS_MOUNT" = "X/$ONE_M" ]
+         then
+            # We mount as many of these as possible in the chroot
+            # area to maximize our changes that grub-install works.
+
+            echo_and_log "$MY_CMD_OK Temporary mount of $FS_MOUNT"
+            mount -t $FS_TYPE $FS_DEV /mnt-tmp$FS_MOUNT
+         fi
+      done
+
+      if [ "X$FS_MOUNT" = "X/boot" ]
+      then
+         # We have a separate /boot mount. Update the boot device
+         BOOT_DEV="$FS_DEV"
+      fi
+   done < /$FS_INFO_DIR_BASE/fs-info.txt
+
+   mount --bind /dev         /mnt-tmp/dev
+   mount --bind /proc        /mnt-tmp/proc
+   mount -n -t sysfs /sys    /mnt-tmp/sys
+
+   BOOT_DEV_NONUM=`echo "$BOOT_DEV" | sed -e 's/[0-9]*$//'`
+
+   if [ -L /mnt-tmp/etc/mtab ]
+   then
+      T_MSG="$MY_CMD_OK Inside target FS, /etc/mtab is a logical link,"
+      T_MSG="$T_MSG doing no modifications"
+      echo_and_log "$T_MSG"
+   else
+      T_MSG="$MY_CMD_OK Building localized version of /etc/mtab"
+      T_MSG="$T_MSG so df works inside old grub-install"
+      echo_and_log "$T_MSG"
+
+      cat /etc/mtab | sed -e 's, /mnt-tmp/, /,' > /mnt-tmp/etc/mtab
+   fi
+
+   T_MSG="$MY_CMD_OK Doing grub-install on device $BOOT_DEV_NONUM"
+   echo_and_log "$T_MSG"
+
+   chroot /mnt-tmp grub-install $BOOT_DEV_NONUM \
+                                > $MNUBOOT_TMP_GRUB 2>&1
+
+   # Output grub-install result, filtering out needless warnings
+
+   cat $MNUBOOT_TMP_GRUB | grep -v "unknown LVM metadata header"
+   rm -f $MNUBOOT_TMP_GRUB
+
+   cd /
+
+   echo_and_log "$MY_CMD_OK Doing final unmounts"
+
+   while read JUNK1 JUNK2 FS_MOUNT JUNK3
+   do
+      for ONE_M in $GRUB_INST_MOUNT_LIST
+      do
+         if [ "X$FS_MOUNT" = "X/$ONE_M" ]
+         then
+            # We unmount all of these temp mounts.
+
+            echo_and_log "$MY_CMD_OK Undoing temp mount of $FS_MOUNT"
+            umount /mnt-tmp$FS_MOUNT
+         fi
+      done
+   done < /$FS_INFO_DIR_BASE/fs-info.txt
+
+   umount /mnt-tmp/sys
+   umount /mnt-tmp/dev
+   umount /mnt-tmp/proc
+   umount /mnt-tmp
+
+   echo_and_log "$MY_CMD_OK Restore complete"
+
+   if [ $HALT_AFTER_OPERATION -eq 0 ]
+   then
+      echo -n "$MY_CMD_OK Waiting $SLEEP_BEFORE_REBOOT seconds"
+      echo    " before rebooting..."
+
+      sleep $SLEEP_BEFORE_REBOOT
+
+      reboot -f
+   else
+      echo -n "$MY_CMD_OK Waiting $SLEEP_BEFORE_REBOOT seconds"
+      echo    " before HALT..."
+
+      sleep $SLEEP_BEFORE_REBOOT
+
+      poweroff -f
+   fi
+
+   MNU_RESTORE_EXIT_RC=0
+
+} ### END FUNCTION do_on_boot_restore()
+
+
+
+
+#######################################################################
+########################    MAIN PROGRAM    ###########################
+#######################################################################
+
+case "$1" in
+
+start) check_for_backup_request
+
+       if [ "X$MNU_BACKUP_ACTIVATED" = "X1" ]
+       then
+          check_prerequisites
+          MNU_REMOTE_LOG="$MNU_BACKUP_LOG_DIR/backup.log"
+          do_on_boot_backup
+          mnuboot_exit $MNU_BACKUP_EXIT_RC
+       fi
+
+       check_for_restore_request
+
+       if [ "X$MNU_RESTORE_ACTIVATED" = "X1" ]
+       then
+          check_prerequisites
+          MNU_REMOTE_LOG="$MNU_BACKUP_LOG_DIR/restore.log"
+          do_on_boot_restore
+          mnuboot_exit $MNU_RESTORE_EXIT_RC
+       fi
+
+       mnuboot_exit 0
+       ;;
+
+stop)  # Nothing to do during STOP
+       ;;
+
+check) # TODO: Not implemented yet
+       ;;
+
+*)     echo "Usage: /etc/init.d/$0 {start|stop|check}"
+       mnuboot_exit 1
+       ;;
+
+esac
+
+mnuboot_exit 0
+

@@ -1,0 +1,36 @@
+#!/bin/bash
+#
+# START_MNU_FREE_LICENSE
+#
+# This file is part of mnuboot-bnr , the backup & restore on boot utility,
+# currently available on the Internet at https://github.com/mnubo/utils
+#
+# Copyright (C) 2014-2015 Mnubo
+# Written by Marc Chatel <mchatel@mnubo.com>, <chatelm@yahoo.com>, 2014.
+#
+# mnuboot-bnr is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published
+# by the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+#
+# END_MNU_FREE_LICENSE
+#
+
+LOCK_DIR=/tmp/add-ssh-auth-key-lock-dir
+MY_PID=$$
+MAX_RETRY_COUNT=5
+GOT_LOCK=0
+MY_TMPFILE_1=/tmp/add-ssh-auth-key.tmp1.$$
+MY_TMPFILE_2=/tmp/add-ssh-auth-key.tmp2.$$
+
+put_key_in_tmp_file()
+{
+   cat << SSH_KEY_EOF1 > $MY_TMPFILE_1

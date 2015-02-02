@@ -1,0 +1,103 @@
+SSH_KEY_EOF1
+#
+# START_MNU_FREE_LICENSE
+#
+# This file is part of mnuboot-bnr , the backup & restore on boot utility,
+# currently available on the Internet at https://github.com/mnubo/utils
+#
+# Copyright (C) 2014-2015 Mnubo
+# Written by Marc Chatel <mchatel@mnubo.com>, <chatelm@yahoo.com>, 2014.
+#
+# mnuboot-bnr is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published
+# by the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+#
+# END_MNU_FREE_LICENSE
+#
+#
+   echo "SUCCESS: Generated temp file with public key to add"
+}
+
+clean_exit_release_lock()
+{
+   echo "SUCCESS: Deleting temp files and releasing lock"
+   rm -f $MY_TMPFILE_1 $MY_TMPFILE_2
+
+   if [ $GOT_LOCK -ne 0 ]
+   then
+      rmdir $LOCK_DIR
+   fi
+
+   exit 0
+}
+
+try_to_get_lock()
+{
+   echo "SUCCESS: Trying to get lock by using mkdir ..."
+   CUR_TRY=0
+   GOT_LOCK=0
+
+   while [ $CUR_TRY -lt $MAX_RETRY_COUNT ]
+   do
+      CUR_TRY=`expr $CUR_TRY + 1`
+
+      mkdir $LOCK_DIR 2> /dev/null
+      MKDIR_RC=$?
+
+      if [ $MKDIR_RC -eq 0 ]
+      then
+         GOT_LOCK=1
+         break
+      else
+         echo "SUCCESS: Lock busy, waiting 2 seconds ..."
+         sleep 2
+      fi
+   done
+
+   if [ $GOT_LOCK -eq 0 ]
+   then
+      echo "FAILED: Failed to get lock, tried $MAX_RETRY_COUNT times."
+      clean_exit_release_lock
+   fi
+
+   echo "SUCCESS: Obtained lock."
+}
+
+add_key_to_authorized_keys()
+{
+   if [ ! -d $HOME/.ssh ]
+   then
+      echo "FAILED: Directory $HOME/.ssh does not exist."
+      clean_exit_release_lock
+   fi
+
+   if [ ! -r $HOME/.ssh/authorized_keys ]
+   then
+      echo "SUCCESS: Creating initial authorized_keys file"
+      cat $MY_TMPFILE_1 > $HOME/.ssh/authorized_keys
+      chmod 600 $HOME/.ssh/authorized_keys
+   else
+      echo "SUCCESS: Making sure authorized_keys contains key to add"
+      cat $MY_TMPFILE_1 $HOME/.ssh/authorized_keys | \
+         sort -u > $MY_TMPFILE_2
+      cat $MY_TMPFILE_2 > $HOME/.ssh/authorized_keys
+   fi
+}
+
+### MAIN PROGRAM ###
+
+put_key_in_tmp_file
+try_to_get_lock
+add_key_to_authorized_keys
+
+clean_exit_release_lock
+

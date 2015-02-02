@@ -1,0 +1,244 @@
+#!/bin/bash
+#
+# START_MNU_FREE_LICENSE
+#
+# This file is part of mnuboot-bnr , the backup & restore on boot utility,
+# currently available on the Internet at https://github.com/mnubo/utils
+#
+# Copyright (C) 2014-2015 Mnubo
+# Written by Marc Chatel <mchatel@mnubo.com>, <chatelm@yahoo.com>, 2014.
+#
+# mnuboot-bnr is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published
+# by the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+#
+# END_MNU_FREE_LICENSE
+#
+
+INST_VERSION="v0.6"
+SSH_CONN_TIMEOUT=5
+
+MY_HOSTNAME=`hostname`
+
+MNUBOOT_INST_TMP_KH=/tmp/mnuboot-bnr-inst-tmp-kh.$$
+MNUBOOT_INST_TMP_RS=/tmp/mnuboot-bnr-inst-tmp-rs.$MY_HOSTNAME.$$
+MNUBOOT_INST_TMP_KEYLIST=/tmp/mnuboot-bnr-inst-tmp-kl.$$
+MNUBOOT_INST_TMP_01=/tmp/mnuboot-bnr-inst-tmp-01.$$
+MNUBOOT_INST_TMP_02=/tmp/mnuboot-bnr-inst-tmp-02.$$
+MNUBOOT_INST_TMP_RDIR=mnuboot-bnr-inst-tmp-rd.$MY_HOSTNAME.$$
+
+T_L="$MNUBOOT_INST_TMP_KH $MNUBOOT_INST_TMP_RS $MNUBOOT_INST_TMP_KEYLIST"
+T_L="$T_L $MNUBOOT_INST_TMP_01 $MNUBOOT_INST_TMP_02"
+
+MNUBOOT_INST_TMP_FILES="$T_L"
+
+clean_exit()
+{
+   rm -f $MNUBOOT_INST_TMP_FILES
+   exit 0
+}
+
+do_ssh_check_on_mnuboot_client()
+{
+   SSH_OPTIONS="-p $TARGET_SSH_PORT -o StrictHostKeyChecking=no"
+   SSH_OPTIONS="$SSH_OPTIONS -o ConnectTimeout=$SSH_CONN_TIMEOUT"
+   SSH_OPTIONS="$SSH_OPTIONS -o UserKnownHostsFile=$MNUBOOT_INST_TMP_KH"
+
+   SSH_CMD="cat > $MNUBOOT_INST_TMP_RS"
+   SSH_CMD="$SSH_CMD; bash $MNUBOOT_INST_TMP_RS $TARGET_HOST_NAME"
+   SSH_CMD="$SSH_CMD; rm -f $MNUBOOT_INST_TMP_RS"
+
+   echo ""
+   echo "--- CONNECTING TO $TARGET_IP_OR_NAME TO CHECK SSH KEYS ... ---"
+   echo ""
+
+   cat mnuboot-bnr-install-ssh-check | \
+       ssh $SSH_OPTIONS $TARGET_ACCT@$TARGET_IP_OR_NAME "$SSH_CMD" \
+           > $MNUBOOT_INST_TMP_KEYLIST
+
+   head -1 < $MNUBOOT_INST_TMP_KEYLIST > $MNUBOOT_INST_TMP_01
+   read RUN_STATUS < $MNUBOOT_INST_TMP_01
+}
+
+add_ssh_keys_on_mnuboot_server()
+{
+   grep -v "^SUCCESS" < $MNUBOOT_INST_TMP_KEYLIST > $MNUBOOT_INST_TMP_01
+
+   SSH_OPTIONS="-p $TARGET_BACKUP_SSH_PORT -o StrictHostKeyChecking=no"
+   SSH_OPTIONS="$SSH_OPTIONS -o ConnectTimeout=$SSH_CONN_TIMEOUT"
+   SSH_OPTIONS="$SSH_OPTIONS -o UserKnownHostsFile=$MNUBOOT_INST_TMP_KH"
+
+   SSH_CMD="cat > $MNUBOOT_INST_TMP_RS; bash $MNUBOOT_INST_TMP_RS"
+   SSH_CMD="$SSH_CMD; rm -f $MNUBOOT_INST_TMP_RS"
+
+   echo ""
+   echo "--- CONNECTING TO $TARGET_BACKUP_SERVER TO ADD SSH KEYS ... ---"
+   echo ""
+   cat mnuboot-bnr-install-add-key-prefix $MNUBOOT_INST_TMP_01 \
+       mnuboot-bnr-install-add-key-suffix |                    \
+       ssh $SSH_OPTIONS $TARGET_BACKUP_USER@$TARGET_BACKUP_SERVER \
+           "$SSH_CMD" \ > $MNUBOOT_INST_TMP_02
+
+   NUM_FAIL_MSGS=`cat $MNUBOOT_INST_TMP_02 | grep "^FAILED" | wc -l`
+   NUM_SUCCESS_MSGS=`cat $MNUBOOT_INST_TMP_02 | grep "^SUCCESS" | wc -l`
+
+   RUN_STATUS=""
+
+   if [ $NUM_FAIL_MSGS -gt 0 ]
+   then
+      RUN_STATUS="FAILED"
+      cat $MNUBOOT_INST_TMP_02 | grep "^FAILED"
+   else
+      if [ $NUM_SUCCESS_MSGS -gt 0 ]
+      then
+         RUN_STATUS="SUCCESS"
+      fi
+
+      cat $MNUBOOT_INST_TMP_02
+   fi
+}
+
+xfer_kit_and_install()
+{
+   echo "SUCCESS: Creating install kit localized to client ..."
+
+   MY_INST_RDIR=/tmp/$MNUBOOT_INST_TMP_RDIR
+
+   rm -rf $MY_INST_RDIR
+   mkdir  $MY_INST_RDIR
+
+   if [ ! -d $MY_INST_RDIR ]
+   then
+      echo "ERROR: Failed to create $MY_INST_RDIR"
+      return
+   fi
+
+   if [ -d ./mnuboot-bnr ]
+   then
+      tar cf - mnuboot-bnr | (cd $MY_INST_RDIR; tar xf - )
+
+      cat mnuboot-bnr/mnuboot-bnr.conf.sample |                      \
+         sed -e "s/TARGET_BACKUP_USER/$TARGET_BACKUP_USER/"          \
+             -e "s/TARGET_IP_OR_NAME/$TARGET_BACKUP_SERVER/"         \
+             -e "s/TARGET_BACKUP_SSH_PORT/$TARGET_BACKUP_SSH_PORT/"  \
+             -e "s/TARGET_BACKUP_TOP_DIR/$TARGET_BACKUP_TOP_DIR/"    \
+             > $MY_INST_RDIR/mnuboot-bnr/mnuboot-bnr.conf
+
+      SSH_CMD="cat > /tmp/${MNUBOOT_INST_TMP_RDIR}.tar"
+      SSH_CMD="$SSH_CMD ; cd /tmp"
+      SSH_CMD="$SSH_CMD ; tar xf ${MNUBOOT_INST_TMP_RDIR}.tar"
+      SSH_CMD="$SSH_CMD ; chown -R $TARGET_ACCT: /tmp/${MNUBOOT_INST_TMP_RDIR}"
+      SSH_CMD="$SSH_CMD ; cd $MNUBOOT_INST_TMP_RDIR/mnuboot-bnr"
+      SSH_CMD="$SSH_CMD ; bash ./mnuboot-bnr-sub-install"
+      SSH_CMD="$SSH_CMD ; cd /tmp"
+      SSH_CMD="$SSH_CMD ; rm -rf $MNUBOOT_INST_TMP_RDIR"
+      SSH_CMD="$SSH_CMD ; rm -f ${MNUBOOT_INST_TMP_RDIR}.tar"
+
+      SSH_OPTIONS="-p $TARGET_SSH_PORT -o StrictHostKeyChecking=no"
+      SSH_OPTIONS="$SSH_OPTIONS -o ConnectTimeout=$SSH_CONN_TIMEOUT"
+      SSH_OPTIONS="$SSH_OPTIONS -o UserKnownHostsFile=$MNUBOOT_INST_TMP_KH"
+
+      MY_PREV_DIR=`pwd`
+      cd /tmp
+      echo ""
+      echo "--- CONNECTING TO $TARGET_IP_OR_NAME TO INSTALL KIT ... ---"
+      echo ""
+      tar cf - $MNUBOOT_INST_TMP_RDIR | \
+         ssh $SSH_OPTIONS $TARGET_ACCT@$TARGET_IP_OR_NAME "$SSH_CMD"
+
+      cd $MY_PREV_DIR
+   else
+      echo "ERROR: Sub-directory ./mnuboot-bnr does not exist"
+   fi
+
+   rm -rf /tmp/$MNUBOOT_INST_TMP_RDIR
+
+}
+
+process_one_conf()
+{
+   CONF_FILE="$1"
+
+   printf "\n\n\nProcessing config file $CONF_FILE ...\n"
+
+   if [ ! -r $CONF_FILE ]
+   then
+      echo "ERROR: Cannot read config file ${CONF_FILE}."
+      return
+   fi
+
+   TARGET_IP_OR_NAME=""
+   TARGET_SSH_PORT=""
+   TARGET_ACCT=""
+   TARGET_BACKUP_SERVER=""
+   TARGET_BACKUP_USER=""
+   TARGET_BACKUP_SSH_PORT=""
+   TARGET_BACKUP_TOP_DIR=""
+
+   BASE_CONF_FILE=`basename $CONF_FILE`
+
+   if [ "X$BASE_CONF_FILE" = "X$CONF_FILE" ]
+   then
+      . ./$CONF_FILE
+   else
+      . $CONF_FILE
+   fi
+
+   TARGET_HOST_NAME=`basename $CONF_FILE | sed -e 's/\.conf$//'`
+
+   do_ssh_check_on_mnuboot_client
+
+   case "X$RUN_STATUS" in
+   "XFAILED")  cat $MNUBOOT_INST_TMP_KEYLIST
+               return
+               ;;
+   "XSUCCESS") cat $MNUBOOT_INST_TMP_KEYLIST | grep "^SUCCESS"
+               ;;
+   *)          echo "ERROR: Unexpected result from SSH check script."
+               return
+               ;;
+   esac
+
+   add_ssh_keys_on_mnuboot_server
+
+   case "X$RUN_STATUS" in
+   "XFAILED")  return
+               ;;
+   "XSUCCESS") echo "--- Continuing with mnuboot install ---"
+               ;;
+   *)          echo "ERROR: Unexpected result from SSH add key script."
+               return
+               ;;
+   esac
+
+   xfer_kit_and_install
+}
+
+### MAIN PROGRAM ###
+
+rm -f $MNUBOOT_INST_TMP_FILES
+
+AT_LEAST_ONE_PARM=0
+
+for CMD_PARM in $*
+do
+   AT_LEAST_ONE_PARM=1
+   process_one_conf $CMD_PARM
+done
+
+if [ $AT_LEAST_ONE_PARM -eq 0 ]
+then
+   echo "Syntax: $0 conf_file_1 conf_file_... conf_file_N"
+fi
+
+clean_exit
+

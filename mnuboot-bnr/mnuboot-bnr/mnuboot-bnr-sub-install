@@ -1,0 +1,154 @@
+#!/bin/bash
+#
+# START_MNU_FREE_LICENSE
+#
+# This file is part of mnuboot-bnr , the backup & restore on boot utility,
+# currently available on the Internet at https://github.com/mnubo/utils
+#
+# Copyright (C) 2014-2015 Mnubo
+# Written by Marc Chatel <mchatel@mnubo.com>, <chatelm@yahoo.com>, 2014.
+#
+# mnuboot-bnr is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published
+# by the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+#
+# END_MNU_FREE_LICENSE
+#
+
+clean_exit()
+{
+   exit 0
+}
+
+detect_os_type()
+{
+   OS_TYPE=""
+
+   MY_LSB_RELEASE=`which lsb_release 2> /dev/null`
+
+   if [ "X$MY_LSB_RELEASE" != "X" ]
+   then
+      OS_TYPE=`lsb_release -is | tr '[:upper:]' '[:lower:]'`
+   fi
+
+   if [ "X$OS_TYPE" != "X" ]
+   then
+      return
+   fi
+
+   if [ -f /etc/centos-release ]
+   then
+      OS_TYPE="centos"
+      return
+   fi
+
+   if [ -f /etc/redhat-release ]
+   then
+      OS_TYPE="centos"
+      return
+   fi
+}
+
+ensure_mnu_init_d()
+{
+   echo "SUCCESS: Checking or setting up /etc/mnu-init.d ..."
+
+   if [ ! -d /etc/mnu-init.d ]
+   then
+      mkdir /etc/mnu-init.d
+
+      if [ ! -d /etc/mnu-init.d ]
+      then
+         T_MSG="FAIL: /etc/mnu-init.d is not a directory"
+         T_MSG="$T_MSG or cannot be created"
+
+         echo "$T_MSG"
+         clean_exit
+      fi
+   fi
+
+   chmod 700         /etc/mnu-init.d
+   chown root:root   /etc/mnu-init.d
+}
+
+copy_to_mnu_init_d()
+{
+   echo "SUCCESS: Copying files to /etc/mnu-init.d ..."
+
+   cp -p ./COPYING*       /etc/mnu-init.d
+   cp -p ./mnuboot-bnr-*  /etc/mnu-init.d
+   chmod 644              /etc/mnu-init.d/COPYING*
+   chmod 700              /etc/mnu-init.d/mnuboot-bnr-*
+   chown root:root        /etc/mnu-init.d/COPYING*
+   chown root:root        /etc/mnu-init.d/mnuboot-bnr-*
+}
+
+copy_config_file()
+{
+   if [ ! -r ./mnuboot-bnr.conf ]
+   then
+      echo "NOTICE: No localized config file found in install directory"
+      return
+   fi
+
+   echo "SUCCESS: Creating file /etc/mnuboot-bnr.conf ..."
+
+   cp ./mnuboot-bnr.conf /etc/mnuboot-bnr.conf
+   chmod 600             /etc/mnuboot-bnr.conf
+   chown root:root       /etc/mnuboot-bnr.conf
+}
+
+install_in_init_d()
+{
+   echo "SUCCESS: Installing startup script in /etc/init.d ..."
+ 
+   TARGET_STARTUP="mnuboot-bnr-$OS_TYPE"
+
+   if [ ! -f /etc/mnu-init.d/$TARGET_STARTUP ]
+   then
+      echo "FAIL: Cannot find startup script for OS type \"$OS_TYPE\""
+      return
+   fi
+
+   cp /etc/mnu-init.d/$TARGET_STARTUP /etc/init.d/mnuboot-bnr
+
+   chmod 700         /etc/init.d/mnuboot-bnr
+   chown root:root   /etc/init.d/mnuboot-bnr
+
+   case "$OS_TYPE" in
+   debian) update-rc.d mnuboot-bnr defaults
+           ;;
+   centos) chkconfig --add mnuboot-bnr
+           ;;
+   *)      echo "FAIL: Do not know how install startup script on this OS"
+           ;;
+   esac
+}
+
+### MAIN PROGRAM ###
+
+detect_os_type
+
+if [ "X$OS_TYPE" = "X" ]
+then
+   echo "FAIL: Failed to detect OS type"
+   clean_exit
+else
+   echo "SUCCESS: Detected OS type as \"$OS_TYPE\""
+fi
+
+ensure_mnu_init_d
+copy_to_mnu_init_d
+copy_config_file
+install_in_init_d
+
+clean_exit

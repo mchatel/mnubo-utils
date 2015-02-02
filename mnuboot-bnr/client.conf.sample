@@ -1,0 +1,72 @@
+#
+# START_MNU_FREE_LICENSE
+#
+# This file is part of mnuboot-bnr , the backup & restore on boot utility,
+# currently available on the Internet at https://github.com/mnubo/utils
+#
+# Copyright (C) 2014-2015 Mnubo
+# Written by Marc Chatel <mchatel@mnubo.com>, <chatelm@yahoo.com>, 2014.
+#
+# mnuboot-bnr is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published
+# by the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+#
+# END_MNU_FREE_LICENSE
+#
+#
+#
+# Install parameters:
+#
+# SSH connections from the install server to the backup client:
+# -------------------------------------------------------------
+#
+# A hostname or IP address that we can use to reach the backup client
+#
+TARGET_IP_OR_NAME=whatever-host.my-company.com
+#
+# To connect by SSH to the backup client, what SSH port should be use?
+#
+TARGET_SSH_PORT=22
+#
+# The account we should connect to (with SSH) to install the backup client.
+# Usually "root" unless the target does not allow direct SSH root login.
+# Note that even if this is not root, during actual backup/restore operation,
+# the client will use its root account SSH keys to connect to the backup
+# server!
+#
+TARGET_ACCT=root
+#
+#
+#
+# SSH connections from the backup client to the backup server:
+# ------------------------------------------------------------
+#
+# The hostname or IP address that the backup client can use
+# to establish SSH connections to the backup server.
+#
+TARGET_BACKUP_SERVER=whatever-backup-server.my-company.com
+#
+# What user (that exists on the backup server) should the backup
+# client log in as on the backup server?
+#
+TARGET_BACKUP_USER=bootback
+#
+# When the backup client connects by SSH to the backup server,
+# what TCP port should it connect to?
+#
+TARGET_BACKUP_SSH_PORT=22
+#
+# When the backup client connects by SSH to the backup server,
+# what sub-directory of the TARGET_BACKUP_USER home directory
+# should it use to store/retrieve backups?
+#
+TARGET_BACKUP_TOP_DIR=boot-backups
