@@ -125,9 +125,21 @@ install_in_init_d()
    chown root:root   /etc/init.d/mnuboot-bnr
 
    case "$OS_TYPE" in
+
    debian) update-rc.d mnuboot-bnr defaults
            ;;
+
    centos) chkconfig --add mnuboot-bnr
+
+           # If the command 'service_conf' is present,
+           # use it to also update the startup script database.
+
+           MY_SERVICE_CONF=`which service_conf 2> /dev/null`
+
+           if [ "X$MY_SERVICE_CONF" != "X" ]
+           then
+              service_conf add mnuboot-bnr
+           fi
            ;;
    *)      echo "FAIL: Do not know how install startup script on this OS"
            ;;
