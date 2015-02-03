@@ -1014,7 +1014,7 @@ unmount_all_but_root_fs()
             continue
          fi
 
-         if [ "X$FS_MOUNT" = "X/" ]
+         if [ "X$FS_MOUNT" = "X/" -o "X$FS_MOUNT" = "X/usr" ]
          then
             continue
          fi
