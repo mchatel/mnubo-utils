@@ -27,7 +27,7 @@
 PATH="/sbin:/bin:/usr/sbin:/usr/bin"
 export PATH
 
-MNUBOOT_BNR_VERSION="v0.6"
+MNUBOOT_BNR_VERSION="v0.61"
 
 #######################################################################
 #                                                                     #
@@ -1630,7 +1630,27 @@ do_on_boot_restore()
    mount --bind /proc        /mnt-tmp/proc
    mount -n -t sysfs /sys    /mnt-tmp/sys
 
-   BOOT_DEV_NONUM=`echo "$BOOT_DEV" | sed -e 's/[0-9]*$//'`
+   # We assume that grub-install will always be run on the
+   # Master Boot Record (MBR) of the device where /boot is located.
+   #
+   # We need to generate the boot device name without a partition.
+   # Two types of device names are supported and understood for now:
+   #
+   # /dev/cciss/ device_spec   p   partition_number
+   # /dev/       device_spec       partition_number
+
+   IS_CCISS=`echo "$BOOT_DEV" | grep "^/dev/cciss/" | wc -l`
+
+   if [ $IS_CCISS -ne 0 ]
+   then
+      BOOT_DEV_NONUM=`echo "$BOOT_DEV" | sed -e 's/p[0-9]*$//'`
+   else
+      BOOT_DEV_NONUM=`echo "$BOOT_DEV" | sed -e 's/[0-9]*$//'`
+   fi
+   
+   T_MSG="$MY_CMD_OK Boot FS is \"$BOOT_DEV\", calculated boot"
+   T_MSG="$T_MSG device is \"$BOOT_DEV_NONUM\"."
+   echo_and_log "$T_MSG"
 
    if [ -L /mnt-tmp/etc/mtab ]
    then
