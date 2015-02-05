@@ -27,7 +27,7 @@
 PATH="/sbin:/bin:/usr/sbin:/usr/bin"
 export PATH
 
-MNUBOOT_BNR_VERSION="v0.61"
+MNUBOOT_BNR_VERSION="v0.62"
 
 #######################################################################
 #                                                                     #
@@ -143,6 +143,7 @@ MNUBOOT_TMP_FILE2="/tmp/mnuboot.tmp2.$$"
 MNUBOOT_TMP_UNMOUNT1="$RAMDISK_MOUNT_POINT/unmount.tmp1.$$"
 MNUBOOT_TMP_UNMOUNT2="$RAMDISK_MOUNT_POINT/unmount.tmp2.$$"
 MNUBOOT_TMP_GRUB="/grub.out.tmp1.$$"
+MNUBOOT_TMP_TAR_STDERR="/tmp/mnuboot.tar.stderr.$$"
 
 # List of temp files to remove on script exit.
 
@@ -1219,6 +1220,8 @@ capture_fs_info()
          IS_UUID="0"
       fi
 
+      IS_UUID="1"   # Test: always capture the UUID
+
       FS_IDX=`expr $FS_IDX + 1`
 
       TUNE_OUTFILE="$FS_INFO_DIR/tune2fs-dev-${FS_IDX}.txt"
@@ -1322,11 +1325,14 @@ do_on_boot_backup()
       # Generate a compressed TAR file of the filesystem,
       # and send it on the fly to the backup server.
 
-      tar cpzf - . | \
+      tar cpzf - . 2> $MNUBOOT_TMP_TAR_STDERR | \
          ssh -p $MNUBOOT_BNR_SSH_PORT -o BatchMode=yes  \
              -o ConnectTimeout=$SSH_CONN_TIMEOUT        \
              -o StrictHostKeyChecking=no $MNU_TARGET    \
              "cat > $MNU_BACKUP_DIR/backup-dev-${FS_IDX}.tar.gz"
+
+      cat $MNUBOOT_TMP_TAR_STDERR | grep -v " socket ignored"
+      rm -f $MNUBOOT_TMP_TAR_STDERR
 
       cd /
       umount /mnt-tmp
@@ -1488,7 +1494,9 @@ do_on_boot_restore()
       T_MSG="$MY_CMD_OK Preparing for restore on device $FS_DEV_VAL"
       echo_and_log "$T_MSG"
 
-      if [ "X$FS_MOUNT_VAL" = "X/" -o "X$FS_MOUNT_VAL" = "X/usr" ]
+      if [ "X$FS_MOUNT_VAL" = "X/"     -o \
+           "X$FS_MOUNT_VAL" = "X/usr"  -o \
+           "X$FS_MOUNT_VAL" = "X/var"        ]
       then
          T_MSG="$MY_CMD_OK Doing temp mount of FS on $FS_DEV_VAL"
          echo_and_log "$T_MSG"
@@ -1731,7 +1739,15 @@ do_on_boot_restore()
 
 case "$1" in
 
-start) check_for_backup_request
+start) printf "%s %s %s\n" \
+              "mnuboot-bnr" "$MNUBOOT_BNR_VERSION" \
+              "Copyright (C) 2014-2015 Mnubo"
+       printf "   Written by %s %s, %s, 2014.\n"   \
+              "Marc Chatel"                     \
+              "<mchatel@mnubo.com>" "<chatelm@yahoo.com>"
+       printf "   Distributed under the GNU Lesser General Public License.\n"
+
+       check_for_backup_request
 
        if [ "X$MNU_BACKUP_ACTIVATED" = "X1" ]
        then
